@@ -67,7 +67,8 @@ class DataQualityEngine:
             "quality_report_path": None,
             "anomaly_report_path": None,
             "drift_report_path": None,
-            "combined_report_path": None
+            "combined_report_path": None,
+            "missing_records": []
         }
 
     # ================================================================
@@ -513,6 +514,41 @@ class DataQualityEngine:
             "Human approval is required before suggestions are applied."
         )
 
+        # Build detailed missing value records with exact row & column mapping
+        missing_records = []
+        for col in original.columns:
+            missing_mask = original[col].isna()
+            if missing_mask.any():
+                is_num = pd.api.types.is_numeric_dtype(original[col])
+                for r_idx, is_miss in enumerate(missing_mask):
+                    if is_miss:
+                        sug_val = proposed.iloc[r_idx][col]
+                        if pd.isna(sug_val):
+                            sug_display = "N/A"
+                        elif is_num:
+                            try:
+                                f_val = float(sug_val)
+                                sug_display = int(f_val) if f_val.is_integer() else round(f_val, 4)
+                            except Exception:
+                                sug_display = str(sug_val)
+                        else:
+                            sug_display = str(sug_val)
+
+                        missing_records.append({
+                            "cell_id": f"{r_idx}_{col}",
+                            "row_idx": int(r_idx),
+                            "row_num": int(r_idx) + 1,
+                            "column": str(col),
+                            "current_value": "Missing (NaN)",
+                            "suggested_value": sug_display,
+                            "replacement_value": str(sug_display),
+                            "approved_value": "",
+                            "status": "Pending",
+                            "data_type": "numeric" if is_num else "categorical"
+                        })
+
+        missing_records.sort(key=lambda x: (x["row_idx"], x["column"]))
+
         self.APP["original"] = original.copy()
         self.APP["proposed"] = proposed.copy()
         self.APP["approved"] = original.copy()
@@ -520,6 +556,7 @@ class DataQualityEngine:
         self.APP["quality_summary"] = pd.DataFrame([metrics])
         self.APP["imputation_report"] = imputation_report.copy()
         self.APP["quality_comparison"] = None
+        self.APP["missing_records"] = missing_records
 
         self.APP["anomaly_report"] = None
         self.APP["drift_report"] = None
@@ -547,6 +584,13 @@ class DataQualityEngine:
 
         self.APP["approved"] = self.APP["proposed"].copy()
 
+        # Keep missing_records audit state in sync
+        if self.APP.get("missing_records"):
+            for r in self.APP["missing_records"]:
+                r["status"] = "Approved"
+                r["approved_value"] = str(r["suggested_value"])
+                r["replacement_value"] = str(r["suggested_value"])
+
         return (
             "Suggested imputation values accepted. You can still edit values "
             "or handle duplicates.",
@@ -558,6 +602,12 @@ class DataQualityEngine:
             return "Upload and analyze a dataset first.", pd.DataFrame()
 
         self.APP["approved"] = self.APP["original"].copy()
+
+        # Keep missing_records audit state in sync
+        if self.APP.get("missing_records"):
+            for r in self.APP["missing_records"]:
+                r["status"] = "Rejected"
+                r["approved_value"] = "Rejected (Missing)"
 
         return (
             "Suggestions rejected. Approved dataset matches the original.",
@@ -626,6 +676,16 @@ class DataQualityEngine:
                 self.APP["approved"].index[row_number], column_name
             ] = converted_value
 
+            # Keep missing_records audit state in sync if this cell was a detected missing value
+            if self.APP.get("missing_records"):
+                target_cell_id = f"{row_number}_{column_name}"
+                for r in self.APP["missing_records"]:
+                    if r["cell_id"] == target_cell_id:
+                        r["status"] = "Approved"
+                        r["replacement_value"] = str(converted_value)
+                        r["approved_value"] = str(converted_value)
+                        break
+
             return (
                 f"Override applied at row {row_number}, column '{column_name}'. "
                 f"Previous: {self.safe_string(old_value)}; "
@@ -635,6 +695,164 @@ class DataQualityEngine:
 
         except Exception as exc:
             return f"Could not apply override: {exc}", self.dataframe_preview(self.APP["approved"])
+
+    # ================================================================
+    # MISSING VALUES AUDIT & INDIVIDUAL CELL GOVERNANCE
+    # ================================================================
+
+    def get_missing_records_df(self):
+        records = self.APP.get("missing_records", [])
+        if not records:
+            return pd.DataFrame(columns=[
+                "Row Number", "Column Name", "Current Value",
+                "Suggested Replacement", "Replacement Value", "Approved Value",
+                "Approval Status", "Row Index", "Cell ID", "Data Type"
+            ])
+        df = pd.DataFrame(records)
+        display_df = pd.DataFrame({
+            "Row Number": df["row_num"],
+            "Column Name": df["column"],
+            "Current Value": df["current_value"],
+            "Suggested Replacement": df["suggested_value"],
+            "Replacement Value": df["replacement_value"],
+            "Approved Value": df["approved_value"],
+            "Approval Status": df["status"],
+            "Row Index": df["row_idx"],
+            "Cell ID": df["cell_id"],
+            "Data Type": df["data_type"]
+        })
+        return display_df
+
+    def get_missing_summary(self):
+        if self.APP["original"] is None:
+            return {
+                "total_missing_cells": 0,
+                "rows_with_missing": 0,
+                "cols_with_missing": 0,
+                "col_breakdown": pd.DataFrame()
+            }
+        df = self.APP["original"]
+        total_missing = int(df.isna().sum().sum())
+        rows_with_missing = int(df.isna().any(axis=1).sum())
+        cols_with_missing = int((df.isna().sum() > 0).sum())
+
+        breakdown_rows = []
+        for col in df.columns:
+            m_cnt = int(df[col].isna().sum())
+            if m_cnt > 0:
+                pct = round(m_cnt / max(len(df), 1) * 100, 2)
+                dtype_str = "Numeric" if pd.api.types.is_numeric_dtype(df[col]) else "Categorical"
+                breakdown_rows.append({
+                    "Column Name": col,
+                    "Missing Cells": m_cnt,
+                    "Missing %": f"{pct}%",
+                    "Data Type": dtype_str
+                })
+        breakdown_df = pd.DataFrame(breakdown_rows)
+        return {
+            "total_missing_cells": total_missing,
+            "rows_with_missing": rows_with_missing,
+            "cols_with_missing": cols_with_missing,
+            "col_breakdown": breakdown_df
+        }
+
+    def update_missing_record(self, cell_id, new_value, new_status):
+        if self.APP["approved"] is None or not self.APP.get("missing_records"):
+            return False, "Upload and analyze a dataset first."
+
+        record = None
+        for r in self.APP["missing_records"]:
+            if r["cell_id"] == cell_id:
+                record = r
+                break
+
+        if record is None:
+            return False, f"Missing value record '{cell_id}' not found."
+
+        row_idx = record["row_idx"]
+        col = record["column"]
+        data_type = record["data_type"]
+
+        if new_status == "Approved":
+            # Type validation for numeric columns
+            if data_type == "numeric":
+                try:
+                    converted_val = float(new_value)
+                    if converted_val.is_integer():
+                        converted_val = int(converted_val)
+                except (ValueError, TypeError):
+                    return False, f"Invalid numeric value '{new_value}' for column '{col}'. Please enter a valid number."
+            else:
+                converted_val = str(new_value)
+
+            # Apply approved change to correct cell in approved dataset
+            if row_idx < len(self.APP["approved"]) and col in self.APP["approved"].columns:
+                self.APP["approved"].loc[self.APP["approved"].index[row_idx], col] = converted_val
+
+            record["status"] = "Approved"
+            record["replacement_value"] = str(converted_val)
+            record["approved_value"] = str(converted_val)
+            return True, f"Approved replacement for Row {record['row_num']}, Column '{col}': {converted_val}"
+
+        elif new_status == "Rejected":
+            # Revert to original missing value (NaN)
+            if row_idx < len(self.APP["approved"]) and col in self.APP["approved"].columns:
+                self.APP["approved"].loc[self.APP["approved"].index[row_idx], col] = np.nan
+
+            record["status"] = "Rejected"
+            record["approved_value"] = "Rejected (Missing)"
+            return True, f"Rejected suggestion for Row {record['row_num']}, Column '{col}'. Cell remains missing."
+
+        elif new_status == "Pending":
+            # Reset cell back to original missing value
+            if row_idx < len(self.APP["approved"]) and col in self.APP["approved"].columns:
+                self.APP["approved"].loc[self.APP["approved"].index[row_idx], col] = np.nan
+
+            record["status"] = "Pending"
+            record["approved_value"] = ""
+            return True, f"Reset Row {record['row_num']}, Column '{col}' to Pending."
+
+        return False, f"Unknown status '{new_status}'."
+
+    def approve_all_missing_records(self, cell_ids=None):
+        if self.APP["approved"] is None or not self.APP.get("missing_records"):
+            return 0, 0, "No records to approve."
+
+        approved_count = 0
+        failed_count = 0
+        target_records = self.APP["missing_records"]
+        if cell_ids is not None:
+            cell_ids_set = set(cell_ids)
+            target_records = [r for r in target_records if r["cell_id"] in cell_ids_set]
+
+        for r in target_records:
+            val = r.get("replacement_value")
+            if val is None or str(val).strip() == "":
+                val = r.get("suggested_value")
+            success, _ = self.update_missing_record(r["cell_id"], val, "Approved")
+            if success:
+                approved_count += 1
+            else:
+                failed_count += 1
+
+        return approved_count, failed_count, f"Approved {approved_count} missing value replacement(s)."
+
+    def reject_all_missing_records(self, cell_ids=None):
+        if self.APP["approved"] is None or not self.APP.get("missing_records"):
+            return 0, "No records to reject."
+
+        rejected_count = 0
+        target_records = self.APP["missing_records"]
+        if cell_ids is not None:
+            cell_ids_set = set(cell_ids)
+            target_records = [r for r in target_records if r["cell_id"] in cell_ids_set]
+
+        for r in target_records:
+            success, _ = self.update_missing_record(r["cell_id"], "", "Rejected")
+            if success:
+                rejected_count += 1
+
+        return rejected_count, f"Rejected {rejected_count} missing value suggestion(s)."
 
     def download_approved_dataset(self):
         if self.APP["approved"] is None:
@@ -658,6 +876,9 @@ class DataQualityEngine:
             "Initial Quality": self.APP["quality_summary"],
             "Imputation Report": self.APP["imputation_report"]
         }
+
+        if self.APP.get("missing_records"):
+            sheets["Missing Values Audit"] = self.get_missing_records_df()
 
         if self.APP["quality_comparison"] is not None:
             sheets["Quality Comparison"] = self.APP["quality_comparison"]
@@ -1272,6 +1493,9 @@ class DataQualityEngine:
             "Initial Quality": self.APP["quality_summary"],
             "Imputation Report": self.APP["imputation_report"]
         }
+
+        if self.APP.get("missing_records"):
+            sheets["Missing Values Audit"] = self.get_missing_records_df()
 
         if self.APP.get("quality_comparison") is not None:
             sheets["Quality Comparison"] = self.APP["quality_comparison"]

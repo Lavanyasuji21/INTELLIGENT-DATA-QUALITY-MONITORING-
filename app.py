@@ -581,6 +581,85 @@ elif page == "🔍 Data Quality Analysis":
         m4.metric("Duplicate Rows", f"{metrics['Duplicate Rows']:,}")
         m5.metric("Quality Score", f"{metrics['Quality Score (%)']}%")
 
+        # Detailed Missing Cell Profiling & Imputation Mapping
+        m_summary = engine.get_missing_summary()
+        missing_df = engine.get_missing_records_df()
+
+        if m_summary["total_missing_cells"] > 0:
+            st.markdown("### 📍 Detected Missing Cell Locations & Imputation Mapping")
+
+            # Missing value summary metrics
+            mc1, mc2, mc3 = st.columns(3)
+            with mc1:
+                st.markdown(f"""
+                <div class="kpi-card">
+                    <div class="kpi-label">Total Missing Cells</div>
+                    <div class="kpi-value" style="color: #ef4444;">{m_summary['total_missing_cells']:,}</div>
+                    <div class="kpi-subtext">Across {m_summary['cols_with_missing']} columns</div>
+                </div>
+                """, unsafe_allow_html=True)
+            with mc2:
+                rows_total = max(len(engine.APP['original']), 1)
+                st.markdown(f"""
+                <div class="kpi-card">
+                    <div class="kpi-label">Rows with Missing Values</div>
+                    <div class="kpi-value" style="color: #f59e0b;">{m_summary['rows_with_missing']:,}</div>
+                    <div class="kpi-subtext">{round(m_summary['rows_with_missing'] / rows_total * 100, 1)}% of all rows affected</div>
+                </div>
+                """, unsafe_allow_html=True)
+            with mc3:
+                cols_total = len(engine.APP['original'].columns)
+                st.markdown(f"""
+                <div class="kpi-card">
+                    <div class="kpi-label">Columns with Missing Values</div>
+                    <div class="kpi-value" style="color: #0d9488;">{m_summary['cols_with_missing']}</div>
+                    <div class="kpi-subtext">Out of {cols_total} total columns</div>
+                </div>
+                """, unsafe_allow_html=True)
+
+            st.markdown("<div style='margin-top: 14px;'></div>", unsafe_allow_html=True)
+
+            tab_miss_table, tab_miss_cols = st.tabs([
+                "📍 Exact Missing Values Table (Row & Column Mapping)",
+                "📊 Column-by-Column Missing Breakdown"
+            ])
+
+            with tab_miss_table:
+                # Search and filter controls
+                f_col1, f_col2, f_col3 = st.columns([2, 2, 2])
+                with f_col1:
+                    col_options = ["All Columns"] + sorted(list(missing_df["Column Name"].unique()))
+                    selected_col = st.selectbox("Filter by Column", options=col_options, key="dq_filter_col")
+                with f_col2:
+                    status_options = ["All Statuses", "Pending", "Approved", "Rejected"]
+                    selected_status = st.selectbox("Filter by Approval Status", options=status_options, key="dq_filter_status")
+                with f_col3:
+                    search_row = st.text_input("Search Row Number (Display)", placeholder="e.g. 4", key="dq_search_row")
+
+                # Apply filters safely
+                filtered_missing = missing_df.copy()
+                if selected_col != "All Columns":
+                    filtered_missing = filtered_missing[filtered_missing["Column Name"] == selected_col]
+                if selected_status != "All Statuses":
+                    filtered_missing = filtered_missing[filtered_missing["Approval Status"] == selected_status]
+                if search_row and search_row.strip():
+                    try:
+                        r_num = int(search_row.strip())
+                        filtered_missing = filtered_missing[filtered_missing["Row Number"] == r_num]
+                    except ValueError:
+                        st.caption("Enter a valid integer row number.")
+
+                # Table with exact requested columns
+                display_cols = ["Row Number", "Column Name", "Current Value", "Suggested Replacement", "Approval Status"]
+                st.caption(f"Showing {len(filtered_missing):,} of {len(missing_df):,} missing cells. (Row numbers start from 1 for human display).")
+                st.dataframe(filtered_missing[display_cols], use_container_width=True, height=min(380, 45 + len(filtered_missing) * 35))
+
+                st.info("💡 **Ready to review or override?** Head to **✍️ Human Approval & Override** in the sidebar to accept, reject, or modify replacement values for these specific cells.")
+
+            with tab_miss_cols:
+                if not m_summary["col_breakdown"].empty:
+                    st.dataframe(m_summary["col_breakdown"], use_container_width=True)
+
         st.markdown("### 🚨 Detected Quality Issues")
         if engine.APP["issues"] is not None and not engine.APP["issues"].empty:
             st.dataframe(engine.APP["issues"], use_container_width=True)
@@ -646,31 +725,181 @@ elif page == "✍️ Human Approval & Override":
         </div>
         """, unsafe_allow_html=True)
 
-        # Section 1: Accept / Reject suggestions
-        st.markdown("### 1. Imputation Decisions")
+        # Section 1: Bulk Imputation Decisions
+        st.markdown("### 1. Bulk Imputation Decisions")
         col_acc, col_rej = st.columns(2)
 
         with col_acc:
-            if st.button("✅ Accept Suggested Values", type="primary", use_container_width=True):
+            if st.button("✅ Accept All Suggested Values", type="primary", use_container_width=True):
                 msg, _ = engine.approve_suggestions()
                 st.session_state["approval_message"] = msg
                 st.toast(msg, icon="✅")
                 st.rerun()
 
         with col_rej:
-            if st.button("❌ Reject Suggested Values", use_container_width=True):
+            if st.button("❌ Reject All Suggested Values", use_container_width=True):
                 msg, _ = engine.reject_suggestions()
                 st.session_state["approval_message"] = msg
                 st.toast(msg, icon="ℹ️")
                 st.rerun()
 
         if st.session_state.get("approval_message"):
-            st.info(f"**Status:** {st.session_state['approval_message']}")
+            st.info(f"**Bulk Status:** {st.session_state['approval_message']}")
 
         st.markdown("---")
 
-        # Section 2: Duplicate Handling
-        st.markdown("### 2. Duplicate Row Governance")
+        # Section 2: Missing Values Review & Individual Cell Governance
+        missing_df = engine.get_missing_records_df()
+
+        if not missing_df.empty:
+            st.markdown("### 2. Missing Values Review & Cell Governance")
+            st.markdown("Review each detected missing cell, modify replacement values, and approve or reject individually or in filtered batches.")
+
+            # Summary KPI Cards
+            total_m = len(missing_df)
+            pending_m = int((missing_df["Approval Status"] == "Pending").sum())
+            approved_m = int((missing_df["Approval Status"] == "Approved").sum())
+            rejected_m = int((missing_df["Approval Status"] == "Rejected").sum())
+
+            sb1, sb2, sb3, sb4 = st.columns(4)
+            sb1.metric("Total Missing Cells", f"{total_m}")
+            sb2.metric("Pending Decisions", f"{pending_m}")
+            sb3.metric("Approved Replacements", f"{approved_m}")
+            sb4.metric("Rejected Suggestions", f"{rejected_m}")
+
+            st.markdown("#### 🔍 Filter & Search Missing Records")
+            flt1, flt2, flt3 = st.columns([2, 2, 2])
+            with flt1:
+                cols_available = ["All Columns"] + sorted(list(missing_df["Column Name"].unique()))
+                flt_col = st.selectbox("Filter by Column", options=cols_available, key="gov_flt_col")
+            with flt2:
+                statuses = ["All Statuses", "Pending", "Approved", "Rejected"]
+                flt_stat = st.selectbox("Filter by Approval Status", options=statuses, key="gov_flt_stat")
+            with flt3:
+                flt_row = st.text_input("Filter by Row Number (Display)", placeholder="e.g. 4", key="gov_flt_row")
+
+            # Apply filters safely
+            filtered_gov = missing_df.copy()
+            if flt_col != "All Columns":
+                filtered_gov = filtered_gov[filtered_gov["Column Name"] == flt_col]
+            if flt_stat != "All Statuses":
+                filtered_gov = filtered_gov[filtered_gov["Approval Status"] == flt_stat]
+            if flt_row and flt_row.strip():
+                try:
+                    r_val = int(flt_row.strip())
+                    filtered_gov = filtered_gov[filtered_gov["Row Number"] == r_val]
+                except ValueError:
+                    st.caption("Please enter an integer row number.")
+
+            # Batch actions for visible filtered records
+            st.markdown("<div style='height: 8px;'></div>", unsafe_allow_html=True)
+            batch1, batch2 = st.columns([1, 1])
+            with batch1:
+                if st.button("✅ Approve All Filtered Pending Suggestions", use_container_width=True):
+                    pending_ids = list(filtered_gov[filtered_gov["Approval Status"] == "Pending"]["Cell ID"])
+                    if pending_ids:
+                        app_cnt, fail_cnt, b_msg = engine.approve_all_missing_records(pending_ids)
+                        st.session_state["gov_message"] = b_msg
+                        st.toast(b_msg, icon="✅")
+                        st.rerun()
+                    else:
+                        st.info("No pending records in current filter.")
+            with batch2:
+                if st.button("❌ Reject All Filtered Pending Suggestions", use_container_width=True):
+                    pending_ids = list(filtered_gov[filtered_gov["Approval Status"] == "Pending"]["Cell ID"])
+                    if pending_ids:
+                        rej_cnt, b_msg = engine.reject_all_missing_records(pending_ids)
+                        st.session_state["gov_message"] = b_msg
+                        st.toast(b_msg, icon="ℹ️")
+                        st.rerun()
+                    else:
+                        st.info("No pending records in current filter.")
+
+            if st.session_state.get("gov_message"):
+                st.info(f"**Action Status:** {st.session_state['gov_message']}")
+
+            st.markdown("#### ✏️ Single Cell Review & Manual Replacement")
+            if not filtered_gov.empty:
+                # Prepare record selector choices
+                record_options = {}
+                for _, r in filtered_gov.iterrows():
+                    lbl = f"Row {r['Row Number']} | Column: {r['Column Name']} | Status: {r['Approval Status']} (Model Suggestion: {r['Suggested Replacement']})"
+                    record_options[lbl] = r
+
+                selected_record_label = st.selectbox(
+                    "Select a Missing Cell Location to Review / Modify",
+                    options=list(record_options.keys()),
+                    key="select_missing_cell"
+                )
+
+                selected_record = record_options[selected_record_label]
+                curr_cell_id = selected_record["Cell ID"]
+
+                # Card for editing with row number and column name displayed prominently
+                badge_class = 'badge-green' if selected_record['Approval Status'] == 'Approved' else ('badge-red' if selected_record['Approval Status'] == 'Rejected' else 'badge-amber')
+                st.markdown(f"""
+                <div style="background: #ffffff; border: 1px solid #e2e8f0; border-radius: 10px; padding: 18px; margin: 12px 0;">
+                    <div style="font-size: 16px; font-weight: 700; color: #0f172a; margin-bottom: 8px;">
+                        Target Cell: <span style="color: #0d9488;">Row {selected_record['Row Number']}</span> (Dataset Index: {selected_record['Row Index']}), Column: <span style="color: #0d9488;">'{selected_record['Column Name']}'</span>
+                    </div>
+                    <div style="font-size: 13px; color: #475569; line-height: 1.8;">
+                        • <b>Data Type:</b> {selected_record['Data Type'].capitalize()}<br/>
+                        • <b>Current Value:</b> <span class="badge badge-red">{selected_record['Current Value']}</span><br/>
+                        • <b>Imputation Model Suggestion:</b> <span class="badge badge-teal">{selected_record['Suggested Replacement']}</span><br/>
+                        • <b>Current Approval Status:</b> <span class="badge {badge_class}">{selected_record['Approval Status']}</span>
+                    </div>
+                </div>
+                """, unsafe_allow_html=True)
+
+                ed_c1, ed_c2 = st.columns([3, 2])
+                with ed_c1:
+                    default_input_val = str(selected_record["Replacement Value"]) if str(selected_record["Replacement Value"]).strip() else str(selected_record["Suggested Replacement"])
+                    custom_replacement = st.text_input(
+                        f"Replacement Value for Row {selected_record['Row Number']}, Column '{selected_record['Column Name']}'",
+                        value=default_input_val,
+                        key=f"rep_val_{curr_cell_id}"
+                    )
+
+                with ed_c2:
+                    st.markdown("<div style='height: 28px;'></div>", unsafe_allow_html=True)
+                    btn_c1, btn_c2, btn_c3 = st.columns(3)
+                    with btn_c1:
+                        if st.button("✅ Approve", key=f"btn_app_{curr_cell_id}", type="primary", use_container_width=True):
+                            success, msg = engine.update_missing_record(curr_cell_id, custom_replacement, "Approved")
+                            if success:
+                                st.session_state["gov_message"] = msg
+                                st.toast(msg, icon="✅")
+                                st.rerun()
+                            else:
+                                st.error(msg)
+                    with btn_c2:
+                        if st.button("❌ Reject", key=f"btn_rej_{curr_cell_id}", use_container_width=True):
+                            success, msg = engine.update_missing_record(curr_cell_id, "", "Rejected")
+                            st.session_state["gov_message"] = msg
+                            st.toast(msg, icon="ℹ️")
+                            st.rerun()
+                    with btn_c3:
+                        if st.button("🔄 Reset", key=f"btn_rst_{curr_cell_id}", use_container_width=True):
+                            success, msg = engine.update_missing_record(curr_cell_id, selected_record["Suggested Replacement"], "Pending")
+                            st.session_state["gov_message"] = msg
+                            st.toast(msg, icon="🔄")
+                            st.rerun()
+
+                # Table of missing records with live status
+                st.markdown("#### 📋 Missing Values Audit Table")
+                display_gov_cols = [
+                    "Row Number", "Column Name", "Current Value",
+                    "Suggested Replacement", "Approved Value", "Approval Status"
+                ]
+                st.dataframe(filtered_gov[display_gov_cols], use_container_width=True, height=min(350, 45 + len(filtered_gov) * 35))
+
+            else:
+                st.info("No records match the selected filter.")
+
+            st.markdown("---")
+
+        # Section 3: Duplicate Handling
+        st.markdown("### 3. Duplicate Row Governance")
         col_dup_rem, col_dup_keep = st.columns(2)
 
         with col_dup_rem:
@@ -692,9 +921,9 @@ elif page == "✍️ Human Approval & Override":
 
         st.markdown("---")
 
-        # Section 3: Manual Human Override
-        st.markdown("### 3. Manual Cell Override")
-        st.markdown("Specify a zero-based row index and column name to replace any specific cell with your manual value.")
+        # Section 4: Manual Human Override for Any Cell
+        st.markdown("### 4. General Manual Cell Override (Any Cell)")
+        st.markdown("Specify any zero-based row index and column name to replace a value in the approved dataset.")
 
         current_approved = engine.APP["approved"]
         col_names = list(current_approved.columns) if current_approved is not None else []
@@ -743,20 +972,57 @@ elif page == "✍️ Human Approval & Override":
 
         st.markdown("---")
 
-        # Section 4: Current Approved Dataset Preview
-        st.markdown("### 📋 Approved Dataset Preview")
+        # Section 5: Current Approved Dataset Preview (with distinction)
+        st.markdown("### 📋 Dataset Previews & Verification")
         if engine.APP["approved"] is not None:
             metrics_appr = engine.calculate_quality_metrics(engine.APP["approved"])
-            st.caption(f"Currently approved dataset contains {metrics_appr['Rows']:,} rows and {metrics_appr['Columns']} columns. Missing cells: {metrics_appr['Missing Cells']:,}.")
-            st.dataframe(engine.dataframe_preview(engine.APP["approved"], 15), use_container_width=True)
+            st.caption(f"Corrected approved dataset contains {metrics_appr['Rows']:,} rows and {metrics_appr['Columns']} columns. Missing cells: {metrics_appr['Missing Cells']:,}. Quality Score: {metrics_appr['Quality Score (%)']}%.")
+
+            pv_tab1, pv_tab2, pv_tab3 = st.tabs([
+                "1. Corrected Approved Dataset (Active)",
+                "2. Original Dataset (Raw Ingested)",
+                "3. Proposed Dataset (ML Imputations)"
+            ])
+
+            with pv_tab1:
+                st.dataframe(engine.dataframe_preview(engine.APP["approved"], 15), use_container_width=True)
+            with pv_tab2:
+                st.dataframe(engine.dataframe_preview(engine.APP["original"], 15), use_container_width=True)
+            with pv_tab3:
+                st.dataframe(engine.dataframe_preview(engine.APP["proposed"], 15), use_container_width=True)
 
         st.markdown("---")
 
-        # Section 5: Downloads
-        st.markdown("### 📥 Download Results")
-        d1, d2 = st.columns(2)
+        # Section 6: Downloads
+        st.markdown("### 📥 Download Corrected Datasets & Reports")
+        d1, d2, d3 = st.columns(3)
 
         with d1:
+            if st.button("💾 Export Corrected Dataset (.xlsx)", use_container_width=True):
+                with st.spinner("Exporting approved dataset to Excel..."):
+                    path = engine.download_approved_dataset()
+                    data_bytes = get_file_bytes(path)
+                    if data_bytes:
+                        st.download_button(
+                            label="⬇️ Download Approved (.xlsx)",
+                            data=data_bytes,
+                            file_name="final_approved_dataset.xlsx",
+                            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                            use_container_width=True
+                        )
+
+        with d2:
+            if engine.APP["approved"] is not None:
+                csv_bytes = engine.APP["approved"].to_csv(index=False).encode("utf-8")
+                st.download_button(
+                    label="⬇️ Export Corrected Dataset (.csv)",
+                    data=csv_bytes,
+                    file_name="final_approved_dataset.csv",
+                    mime="text/csv",
+                    use_container_width=True
+                )
+
+        with d3:
             if st.button("📊 Generate Quality Excel Report", use_container_width=True):
                 with st.spinner("Generating multi-tab Excel report..."):
                     path = engine.download_quality_report()
@@ -766,20 +1032,6 @@ elif page == "✍️ Human Approval & Override":
                             label="⬇️ Download Quality Report (.xlsx)",
                             data=data_bytes,
                             file_name="data_quality_report.xlsx",
-                            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                            use_container_width=True
-                        )
-
-        with d2:
-            if st.button("💾 Export Approved Dataset (.xlsx)", use_container_width=True):
-                with st.spinner("Exporting approved dataset to Excel..."):
-                    path = engine.download_approved_dataset()
-                    data_bytes = get_file_bytes(path)
-                    if data_bytes:
-                        st.download_button(
-                            label="⬇️ Download Approved Dataset (.xlsx)",
-                            data=data_bytes,
-                            file_name="final_approved_dataset.xlsx",
                             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                             use_container_width=True
                         )

@@ -18,12 +18,16 @@ Built with **Streamlit**, **scikit-learn**, and **TensorFlow/Keras**, fully depl
    - Utilizes `RandomForestClassifier` with balanced subsampling for categorical features.
    - Graceful fallback to median/mean/mode when observed data points are sparse.
 
-3. **Human-in-the-Loop Governance & Manual Overrides**
+3. **Human-in-the-Loop Governance & Missing Values Cell-Level Review**
    - Proposed imputation values are **never applied automatically**.
-   - Review proposed vs. original datasets with side-by-side previews.
-   - One-click buttons to **Accept Suggested Values** or **Reject Suggested Values**.
-   - Deduplication controls: **Remove Duplicates** or **Keep Duplicates**.
-   - Precise single-cell manual override by specifying row index, column name, and replacement value.
+   - **Missing Values Governance Grid:** Displays exact Row Number (1-based), Column Name, Current Missing Value (`Missing (NaN)`), ML Suggested Replacement, and Approval Status (`Pending`, `Approved`, `Rejected`).
+   - Search & filtering by Row Number, Column Name, and Status.
+   - Cell-level review with real-time data type validation (prevents entering text in numeric columns).
+   - Single-click **Approve** / **Reject** per cell, plus batch **Approve All Filtered Pending** and **Reject All Filtered Pending**.
+   - Dedup controls: **Remove Duplicates** or **Keep Duplicates**.
+   - Direct cell override with instant visual feedback and audit log updates.
+   - Multi-tab previews: **Approved Dataset**, **Original Raw Dataset**, and **Proposed ML Imputations**.
+   - Download approved dataset as `.xlsx` or `.csv`.
 
 4. **Explainable Dual-Model Anomaly Detection**
    - **TensorFlow Autoencoder:** Multi-layer neural network trained on normalized numeric features to identify high reconstruction loss rows.
@@ -72,9 +76,10 @@ The platform enforces strict multi-user session isolation:
 │   ├── core_engine.py         # Session-isolated algorithmic engine
 │   └── sample_data.py         # Realistic demo data generators (quality & drift)
 └── tests/
-    ├── test_engine.py         # Unit tests for core algorithms
-    ├── test_e2e_features.py   # Comprehensive end-to-end verification tests
-    └── test_streamlit_pages.py# Automated multi-page UI rendering tests
+    ├── test_engine.py          # Unit tests for core algorithms
+    ├── test_e2e_features.py    # Comprehensive end-to-end verification tests
+    ├── test_missing_workflow.py# Tests for missing-value tracking, approval & validation
+    └── test_streamlit_pages.py # Automated multi-page UI rendering tests
 ```
 
 ---
